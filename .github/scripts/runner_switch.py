@@ -16,6 +16,7 @@ import json
 import math
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,6 +31,10 @@ SEARCH_CAP = 1000
 # 締めた区間に入れるのは、作られてから 48 時間たった run だけにする。
 # 48 時間にしているのは、どのワークフローの timeout-minutes よりも十分に長く、締めたあとに run の中のジョブが増えないため（再実行で増える分は README の「数えない分」にある）。
 SETTLE_AFTER = dt.timedelta(hours=48)
+
+# API の呼び出し回数の上限に当たったときに、枠が戻るのを待つ最長の秒数。
+# 15 分にしているのは、ジョブの timeout-minutes（20 分）の中で、待ったあとに数え終える時間を残すため。
+MAX_RATE_LIMIT_WAIT = 15 * 60
 
 
 @dataclasses.dataclass
@@ -88,15 +93,21 @@ class GitHub:
             req.add_header("Authorization", f"Bearer {self.token}")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as res:
-                raw = res.read()
-                return res.status, json.loads(raw) if raw else None
-        except urllib.error.HTTPError as err:
-            # 404 だけを呼び出し側に返すのは、変数がまだないことを 404 で見分けるため（ほかの失敗は止めて、ジョブを落とす）。
-            if err.code == 404:
-                return 404, None
-            raise RuntimeError(f"{method} {url} が {err.code} で失敗した: {err.read().decode(errors='replace')}") from err
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as res:
+                    raw = res.read()
+                    return res.status, json.loads(raw) if raw else None
+            except urllib.error.HTTPError as err:
+                # 404 だけを呼び出し側に返すのは、変数がまだないことを 404 で見分けるため（ほかの失敗は止めて、ジョブを落とす）。
+                if err.code == 404:
+                    return 404, None
+                wait = rate_limit_wait(err.code, err.headers, time.time())
+                if attempt == 0 and wait is not None:
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"{method} {url} が {err.code} で失敗した: {err.read().decode(errors='replace')}") from err
+        raise AssertionError("ここには来ない")
 
     def get(self, path: str) -> dict:
         """get は、GET して 404 なら止める。"""
@@ -104,6 +115,20 @@ class GitHub:
         if status == 404 or body is None:
             raise RuntimeError(f"GET {path} が見つからない")
         return body
+
+
+def rate_limit_wait(status: int, headers, now: float) -> float | None:
+    """rate_limit_wait は、API の呼び出し回数の上限に当たったとき、枠が戻るまで待つ秒数を返す（待たずに落とすときは None）。"""
+    # 上限に当たると 403 か 429 が返り、x-ratelimit-remaining が 0 で、x-ratelimit-reset に枠が戻る時刻（UNIX 秒）が入る。
+    # ref: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-primary-rate-limit
+    if status not in (403, 429) or headers.get("x-ratelimit-remaining") != "0":
+        return None
+    try:
+        wait = float(headers.get("x-ratelimit-reset", "")) - now + 5
+    except ValueError:
+        return None
+    # 待つのを MAX_RATE_LIMIT_WAIT までにするのは、それより長いとジョブの timeout-minutes に届くため（届くなら落として、次の確認の回に任せる）。
+    return max(wait, 0) if wait <= MAX_RATE_LIMIT_WAIT else None
 
 
 def iso(t: dt.datetime) -> str:

@@ -172,5 +172,21 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(gh.calls[0], ("POST", "/repos/o/state/issues/5/comments"))
 
 
+class RateLimitTest(unittest.TestCase):
+    """RateLimitTest は、呼び出し回数の上限に当たったときに待つかどうかの判断を確かめる。"""
+
+    def test_waits_until_reset(self) -> None:
+        headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1000"}
+        self.assertEqual(rs.rate_limit_wait(403, headers, 900.0), 105.0)
+
+    def test_gives_up_when_reset_is_too_far(self) -> None:
+        headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(rs.MAX_RATE_LIMIT_WAIT + 100)}
+        self.assertIsNone(rs.rate_limit_wait(429, headers, 0.0))
+
+    def test_does_not_wait_on_other_errors(self) -> None:
+        self.assertIsNone(rs.rate_limit_wait(403, {"x-ratelimit-remaining": "12"}, 0.0))
+        self.assertIsNone(rs.rate_limit_wait(500, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "10"}, 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()
