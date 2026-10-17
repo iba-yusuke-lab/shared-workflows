@@ -1,0 +1,89 @@
+name: Runner Switch
+
+on:
+  # 6 時間ごとにしているのは、連続する 6 時間の使用量の最大より、しきい値から無料枠までの余裕のほうが大きくなるようにしきい値を決めてあるため（1 時間ごとにすると、確認のジョブが増えるわりに余裕は変わらない）。
+  # 分を 23 にしているのは、毎時 0 分は GitHub の schedule が混んで遅れやすいため。
+  schedule:
+    - cron: "23 */6 * * *"
+  # 設定を変えたあとなどに、手で起こして数えた結果だけを確かめられるようにする（既定は dry-run で、RUNNER も Issue も書かない）。
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 数えて決めるだけで、RUNNER と Issue に反映しない
+        type: boolean
+        default: true
+
+# 2 つが同時に走って変数を書き合わないように、1 つずつ順に走らせる。
+concurrency:
+  group: runner-switch
+  cancel-in-progress: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  switch:
+    name: Switch runner
+    # GitHub のランナーで走らせるのは、public のリポジトリでは標準のランナーが無料で、org の無料枠を使い切っていても止まらず、月が替わったときに確実に Blacksmith へ戻せるため。
+    # ref: https://docs.github.com/en/billing/concepts/product-billing/github-actions
+    runs-on: ubuntu-24.04
+    # 初回と月初は今月分の run をまとめて数えるので長めに取る。
+    timeout-minutes: 20
+    permissions:
+      contents: read # checkout（変数と Issue は GitHub App のトークンで書く）
+    env:
+      # 見張るリポジトリと Issue を立てるリポジトリは、このリポジトリの Repository variables に置く。
+      # コードに書かないのは、このリポジトリが public で、private のリポジトリの名前を出さないため（variables の値は外から見えない）。
+      MANAGED_REPOS: ${{ vars.MANAGED_REPOS }}
+      ISSUE_REPO: ${{ vars.RUNNER_SWITCH_ISSUE_REPO }}
+    steps:
+      # 変数が空のままトークンを作ると、repositories が空になって install 先の全リポジトリに届くトークンになるので、先に止める。
+      - name: Check settings
+        run: |
+          if [[ -z "${MANAGED_REPOS}" || -z "${ISSUE_REPO}" ]]; then
+            echo "::error::Repository variables の MANAGED_REPOS と RUNNER_SWITCH_ISSUE_REPO を設定する"
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 見張るリポジトリと、状態を置くこのリポジトリの変数を書く短命トークンを、iba-lab-bot の秘密鍵から作る。
+      # repositories を書いているのは、トークンが届く範囲を見張るリポジトリとこのリポジトリだけにするため（owner だけを書くと install 先の全リポジトリに広がる）。
+      # 権限は permission-* で、この bot が使う 3 つだけに絞る（GitHub App が持つほかの権限は、ほかのワークフローのためのもので、ここでは使わない）。
+      # ref（repositories）: https://github.com/actions/create-github-app-token/tree/64ab729a6294000f5aa4a4bc0b73d1f32bc45510#repositories
+      # ref（permission-*）: https://github.com/actions/create-github-app-token/tree/64ab729a6294000f5aa4a4bc0b73d1f32bc45510#permission-permission-name
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.IBA_LAB_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.IBA_LAB_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ format('{0},{1}', vars.MANAGED_REPOS, github.event.repository.name) }}
+          permission-actions: read
+          permission-issues: write
+          # GitHub App の権限名は actions_variables で、action.yml の入力の一覧にはないが、action は permission- で始まる入力を全部読んで権限名に直す（実行時に Unexpected input の警告が出るが、権限は付く）。
+          # ref: https://github.com/actions/create-github-app-token/blob/64ab729a6294000f5aa4a4bc0b73d1f32bc45510/lib/get-permissions-from-inputs.js#L10-L14
+          permission-actions-variables: write
+
+      # ログには使用量もリポジトリ名も出さない（README の「public のリポジトリに置くための決まり」）。
+      - name: Switch runner
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          STATE_REPO: ${{ github.repository }}
+          # しきい値は無料枠（3,000 分）の 60% で、決めた経緯は利用側のリポジトリの ADR にある。
+          THRESHOLD_MINUTES: "1800"
+          FREE_MINUTES: "3000"
+          FALLBACK_RUNNER: ubuntu-24.04
+          BLACKSMITH_LABEL_PREFIX: blacksmith-
+          REVERT_NOT_BEFORE_HOURS: "12"
+          # schedule では inputs が空なので、手で起こして dry-run を外したときと同じく書き込む。
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
+        run: python3 -I .github/scripts/runner_switch.py

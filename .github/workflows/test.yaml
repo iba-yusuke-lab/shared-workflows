@@ -1,0 +1,41 @@
+name: Test
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches: [main]
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/test.yaml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Test scripts
+    # GitHub のランナーに固定しているのは、public のリポジトリでは無料で、fork からの PR が org の Blacksmith で走らないようにするため。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # bot の判定と数え方を、API を呼ばずに確かめる。
+      - name: Run unit tests
+        working-directory: .github/scripts
+        run: python3 -m unittest -v

@@ -1,0 +1,40 @@
+name: CI
+
+# このリポジトリ自身の PR に、ほかのリポジトリへ配る reusable workflow を掛ける。
+# 呼ぶ側と同じ形で呼ぶので、配る前に reusable workflow 自体が動くことも確かめられる。
+# ランナーを GitHub のランナーに固定しているのは、public のリポジトリでは無料で、fork からの PR が org の Blacksmith で走らないようにするため。
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gha-lint:
+    name: GitHub Actions CI
+    permissions:
+      contents: read # checkout と zizmor の online-audits
+    # self-repository 構文（$/）にしているのは、checkout に関係なく、いま走っているコミットの reusable workflow を呼ぶため。
+    uses: $/.github/workflows/gha-lint.yaml
+    with:
+      runner: ubuntu-24.04
+
+  gitleaks:
+    name: Gitleaks
+    permissions:
+      contents: read # checkout
+    uses: $/.github/workflows/gitleaks.yaml
+    with:
+      runner: ubuntu-24.04

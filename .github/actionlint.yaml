@@ -1,0 +1,19 @@
+# actionlint の設定
+self-hosted-runner:
+  # Blacksmith のホステッドランナー。
+  # GitHub 標準のラベルではないので、知らせておかないと runner-label で落ちる。
+  labels:
+    - blacksmith-2vcpu-ubuntu-2404
+
+paths:
+  .github/workflows/**/*.yaml:
+    # actionlint は以下の構文に未対応なので、これらの文言のエラーだけ ignore する。
+    # 対応版が出たら該当の ignore を消す。
+    ignore:
+      # reusable workflow を self-repository 構文（`$/.github/workflows/…`）で呼んでいる。
+      # ref: https://github.com/rhysd/actionlint/issues/711
+      - 'reusable workflow call "\$/[^"]+" at "uses" is not following the format'
+
+      # ワークフローファイルでステップを parallel でグループ化している箇所がある。
+      # ref: https://github.com/rhysd/actionlint/issues/693
+      - 'step must run script with "run" section or run action with "uses" section'

@@ -1,0 +1,170 @@
+name: GitHub Actions CI
+
+# 呼ぶ側のワークフローとリポジトリの設定を、zizmor・actionlint・ghalint と独自の規約で検査する reusable workflow。
+# 呼ぶ側は起動の条件（on: と paths）だけを持ち、検査の中身はここを SHA で固定して呼ぶ（README の「GitHub Actions CI」）。
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: ジョブを走らせるランナーのラベル（呼ぶ側の vars.RUNNER を渡す）
+        type: string
+        default: blacksmith-2vcpu-ubuntu-2404
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    name: Lint Workflows
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout と online-audits の GitHub API
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 呼ぶ側の mise.toml にバージョンと shellcheck の規則があればそれを使うのは、ツールのバージョンを mise.toml に集めているリポジトリで、手元の mise run gha:lint と同じ条件で検査するため。
+      # mise.toml を持たないリポジトリは、下の既定のバージョンと .shellcheckrc を使う。
+      # shellcheck の規則を環境変数で渡すのは、actionlint が shellcheck を --norc で呼び、.shellcheckrc がワークフローの run に届かないため。
+      # ref: https://github.com/rhysd/actionlint/blob/v1.7.12/rule_shellcheck.go#L193
+      #   - `-p toml` は入力を TOML として読む
+      #   - `-oy` は値を引用符なしの素の文字列で出し、キーがなければ null を出す
+      - name: Read lint settings
+        id: settings
+        env:
+          DEFAULT_ZIZMOR: 1.30.1
+          DEFAULT_ACTIONLINT: 1.7.12
+          DEFAULT_GHALINT: 1.5.6
+        run: |
+          # read_tool は、mise.toml にツールのバージョンがあればそれを、なければ既定値を出す。
+          read_tool() {
+            local -r key="$1" fallback="$2"
+            local version=""
+            if [[ -f mise.toml ]]; then
+              version="$(yq -p toml -oy ".tools[\"${key}\"] // \"\"" mise.toml)"
+            fi
+            printf '%s' "${version:-${fallback}}"
+          }
+          # 一度変数に受けてから書くのは、printf の引数の中のコマンド置換が失敗しても、set -e で止まらないため。
+          zizmor="$(read_tool aqua:zizmorcore/zizmor "${DEFAULT_ZIZMOR}")"
+          actionlint="$(read_tool aqua:rhysd/actionlint "${DEFAULT_ACTIONLINT}")"
+          ghalint="$(read_tool aqua:suzuki-shunsuke/ghalint "${DEFAULT_GHALINT}")"
+          printf 'zizmor=%s\nactionlint=%s\nghalint=%s\n' "${zizmor}" "${actionlint}" "${ghalint}" >> "${GITHUB_OUTPUT}"
+
+          shellcheck_opts=""
+          if [[ -f mise.toml ]]; then
+            shellcheck_opts="$(yq -p toml -oy '.env.SHELLCHECK_OPTS // ""' mise.toml)"
+          fi
+          # .shellcheckrc の `enable=all` などの行を、先頭に `--` を付けて shellcheck のオプションにする。
+          #   - コメントと空行は落とす
+          #   - `paste -sd ' '` は複数行を空白区切りの 1 行にまとめる
+          if [[ -z "${shellcheck_opts}" && -f .shellcheckrc ]]; then
+            shellcheck_opts="$(grep -vE '^[[:space:]]*(#|$)' .shellcheckrc | sed 's/^/--/' | paste -sd ' ')"
+          fi
+          printf 'shellcheck-opts=%s\n' "${shellcheck_opts}" >> "${GITHUB_OUTPUT}"
+
+      # 3 つの lint を 1 ジョブに並べるのは、ジョブ単位の切り上げ課金を 3 回払わないため（どれかが落ちても残りは走るので、指摘は 1 回でそろう）。
+      # parallel: の中のステップは actionlint が検査しないので、"${var}" などの決まりは手で守る。
+      - parallel:
+          # セキュリティの検査
+          # 設定は呼ぶ側の .github/zizmor.yml を zizmor が自分で探して読む。
+          # ref: https://docs.zizmor.sh/audits/
+          - name: Run zizmor 🌈
+            uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
+            with:
+              # Code scanning へアップロードせずに切るのは、アップロードだとジョブが落ちず、指摘があっても PR を止められないため（private リポジトリでは Code Security も必要になる）。
+              # ref: https://github.com/zizmorcore/zizmor-action/tree/85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e#advanced-security
+              advanced-security: false
+              # 指摘を PR の該当行に注釈で出す。
+              # ref: https://github.com/zizmorcore/zizmor-action/tree/85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e#annotations
+              annotations: true
+              # regular では方針違反（permissions の欠落や SHA 固定の古さ）を見ず、auditor では誤検知まで出るので、その中間を取る。
+              # ref: https://github.com/zizmorcore/zizmor-action/tree/85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e#persona
+              persona: pedantic
+              # GitHub API を叩く検査を有効にする（token は github.token で、contents: read で足りる）。
+              # ref: https://github.com/zizmorcore/zizmor-action/tree/85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e#online-audits
+              online-audits: true
+              # 省略すると latest になり、zizmor の新しいバージョンが出た日に監査項目が増えて PR が落ちるので固定する。
+              # zizmor を上げた PR が Unknown version で落ちたら、zizmor-action がそのバージョンをまだ知らないので、ここの zizmor-action を先に上げる。
+              # ref: https://github.com/zizmorcore/zizmor-action/tree/85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e#version
+              version: ${{ steps.settings.outputs.zizmor }}
+
+          # 書き間違いの検査
+          # 設定は呼ぶ側の .github/actionlint.yaml を actionlint が自分で探して読む。
+          # ref: https://github.com/rhysd/actionlint/blob/v1.7.12/docs/checks.md
+          - name: Run actionlint
+            uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+            env:
+              # shellcheck 本体はランナーに入っているものを使うので、ここだけ手元とバージョンがそろわない。
+              SHELLCHECK_OPTS: ${{ steps.settings.outputs.shellcheck-opts }}
+            with:
+              # latest だと actionlint の新しいバージョンが出た日に CI の結果が変わるので固定する。
+              version: ${{ steps.settings.outputs.actionlint }}
+              # 使う Python がないので pyflakes は入れない。
+              pyflakes: false
+
+          # 方針の検査
+          # 設定は呼ぶ側の .github/ghalint.yaml を ghalint が自分で探して読む。
+          # GitHub Actions の action がないので、GitHub Releases から落として attestation で検証する。
+          # ref: https://github.com/suzuki-shunsuke/ghalint/blob/v1.5.6/docs/install.md
+          - name: Run ghalint
+            env:
+              GH_TOKEN: ${{ github.token }}
+              GHALINT_VERSION: ${{ steps.settings.outputs.ghalint }}
+            run: |
+              # asset 名もタグも、mise.toml の値に v を付けない形と付ける形で組む。
+              asset="ghalint_${GHALINT_VERSION}_linux_amd64.tar.gz"
+              dir="${RUNNER_TEMP}/ghalint"
+              mkdir -p "${dir}"
+              gh release download -R suzuki-shunsuke/ghalint "v${GHALINT_VERSION}" -p "${asset}" -D "${dir}"
+              # ダウンロードした tar.gz のハッシュを、GitHub が保管する署名付きの証明（attestation）と突き合わせる。
+              # ref: https://cli.github.com/manual/gh_attestation_verify
+              gh attestation verify "${dir}/${asset}" -R suzuki-shunsuke/ghalint \
+                --signer-workflow suzuki-shunsuke/go-release-workflow/.github/workflows/release.yaml
+              tar xzf "${dir}/${asset}" -C "${dir}" ghalint
+              # run が .github/workflows/、run-action が .github/actions/*/action.yaml の検査
+              "${dir}/ghalint" run
+              "${dir}/ghalint" run-action
+
+          # 独自の規約の検査
+          # 指摘は ::error の注釈で PR の該当ファイルに出す。
+          # ref: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-error-message
+          - name: Check workflow conventions
+            run: |
+              # nullglob にしているのは、composite action がないリポジトリで下の glob が文字列のまま残り、yq が存在しないファイルを開いて落ちるため。
+              shopt -s nullglob
+              fail=0
+              for f in .github/workflows/*.yaml; do
+                # defaults.run.shell の検査
+                # shell を書くと bash が -eo pipefail で起動し、パイプの前段の失敗も拾えるため検査する（省略時は -e だけで、パイプの途中が落ちても run は成功扱いになる）。
+                # ref: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#defaultsrunshell
+                if ! yq -e '.defaults.run.shell == "bash"' "${f}" >/dev/null; then
+                  echo "::error file=${f}::defaults.run.shell: bash がない"
+                  fail=1
+                fi
+
+                # name の検査
+                # name がないと生のコマンドがログの見出しになり、どのステップで落ちたか読み取りにくいため検査する（zizmor の anonymous-definition はワークフローとジョブしか見ない）。
+                # ref: https://docs.zizmor.sh/audits/#anonymous-definition
+                # parallel のグループ自体は name を持たないので中のステップを見て、reusable workflow を呼ぶだけのジョブ（steps がない）は飛ばす。
+                if ! yq -e '[.jobs[] | select(has("steps")) | .steps[] | ((select(has("parallel")) | .parallel[]), select(has("parallel") | not)) | select(has("name") | not)] | length == 0' "${f}" >/dev/null; then
+                  echo "::error file=${f}::name のないステップがある"
+                  fail=1
+                fi
+              done
+
+              for f in .github/actions/*/action.yaml; do
+                # composite action の name の検査
+                # 検査する理由はワークフローと同じで、ステップの置き場所だけ .runs.steps[] に変わる（defaults は action.yaml に書けないので shell の検査はない）。
+                if ! yq -e '[.runs.steps[] | select(has("name") | not)] | length == 0' "${f}" >/dev/null; then
+                  echo "::error file=${f}::name のないステップがある"
+                  fail=1
+                fi
+              done
+              exit "${fail}"

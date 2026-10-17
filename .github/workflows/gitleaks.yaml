@@ -1,0 +1,71 @@
+name: Gitleaks
+
+# PR で積んだコミットに、クレデンシャルが混ざっていないかを gitleaks で検査する reusable workflow。
+# 呼ぶ側は pull_request で呼ぶ（PR のベースブランチから HEAD までのコミットを見るため）。
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: ジョブを走らせるランナーのラベル（呼ぶ側の vars.RUNNER を渡す）
+        type: string
+        default: blacksmith-2vcpu-ubuntu-2404
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gitleaks:
+    name: Gitleaks
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gitleaks には PR で積んだコミット（PR のベースブランチから HEAD まで）を渡す
+          fetch-depth: 0
+          persist-credentials: false
+
+      # 公式の gitleaks-action を使わず、配布物を落としてチェックサムで検証してから走らせる（gitleaks-action は org のリポジトリにライセンスキーを求める）。
+      # 呼ぶ側の mise.lock に gitleaks があればその URL とチェックサムを使うのは、手元の pre-commit の hook が走らせるのと同じ配布物で検査するため。
+      # mise.lock を持たないリポジトリは、下の既定の URL とチェックサムを使う（gitleaks の配布物には attestation がないので、ハッシュを固定して確かめる）。
+      #   - `-p toml` は入力を TOML として読む
+      #   - `[0]` は mise.lock の `[[tools."aqua:gitleaks/gitleaks"]]`（配列の表）の 1 つ目
+      - name: Install gitleaks
+        env:
+          DEFAULT_URL: https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          DEFAULT_CHECKSUM: sha256:551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          url="${DEFAULT_URL}"
+          checksum="${DEFAULT_CHECKSUM}"
+          if [[ -f mise.lock ]]; then
+            locked="$(yq -p toml -oy '.tools["aqua:gitleaks/gitleaks"][0]["platforms.linux-x64"] | (.url // "") + " " + (.checksum // "")' mise.lock)"
+            if [[ "${locked}" != " " ]]; then
+              read -r url checksum <<< "${locked}"
+            fi
+          fi
+          dir="${RUNNER_TEMP}/gitleaks"
+          mkdir -p "${dir}"
+          curl -fsSL -o "${dir}/gitleaks.tar.gz" "${url}"
+          # チェックサムが合わなければ sha256sum が 1 で終わり、ステップが落ちる。
+          echo "${checksum#sha256:}  ${dir}/gitleaks.tar.gz" | sha256sum -c -
+          tar xzf "${dir}/gitleaks.tar.gz" -C "${dir}" gitleaks
+          echo "${dir}" >> "${GITHUB_PATH}"
+
+      - name: Run gitleaks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # ファイルの現状ではなくコミットごとの差分を見るので、途中のコミットに混入したクレデンシャルも検知できる。
+        # --redact を外すと検出した値が CI のログに平文で残ってしまうのでつける。
+        # 誤検知は、該当行の末尾に gitleaks:allow のコメントを書くか、.gitleaksignore に fingerprint を置いて逃がす。
+        run: |
+          if [[ -z "${BASE_SHA}" ]]; then
+            echo "::error::pull_request 以外から呼ばれたので、PR で積んだコミットの範囲が分からない"
+            exit 1
+          fi
+          gitleaks git --redact --no-banner --log-opts="${BASE_SHA}..HEAD"
