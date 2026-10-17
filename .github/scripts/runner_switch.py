@@ -36,6 +36,10 @@ SETTLE_AFTER = dt.timedelta(hours=48)
 # 15 分にしているのは、ジョブの timeout-minutes（20 分）の中で、待ったあとに数え終える時間を残すため。
 MAX_RATE_LIMIT_WAIT = 15 * 60
 
+# 1 つの呼び出しを試す回数の上限（初回を含む）。
+# 4 回にしているのは、5xx のやり直しが 2・4・8 秒の間で収まり、一時的な失敗なら回復するのに十分なため。
+MAX_ATTEMPTS = 4
+
 
 @dataclasses.dataclass
 class Config:
@@ -93,7 +97,7 @@ class GitHub:
             req.add_header("Authorization", f"Bearer {self.token}")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        for attempt in range(2):
+        for attempt in range(MAX_ATTEMPTS):
             try:
                 with urllib.request.urlopen(req, timeout=30) as res:
                     raw = res.read()
@@ -102,12 +106,15 @@ class GitHub:
                 # 404 だけを呼び出し側に返すのは、変数がまだないことを 404 で見分けるため（ほかの失敗は止めて、ジョブを落とす）。
                 if err.code == 404:
                     return 404, None
-                wait = rate_limit_wait(err.code, err.headers, time.time())
-                if attempt == 0 and wait is not None:
-                    time.sleep(wait)
-                    continue
-                raise RuntimeError(f"{method} {url} が {err.code} で失敗した: {err.read().decode(errors='replace')}") from err
-        raise AssertionError("ここには来ない")
+                wait = retry_wait(method, err.code, err.headers, time.time(), attempt)
+                if wait is None:
+                    raise RuntimeError(f"{method} {url} が {err.code} で失敗した: {err.read().decode(errors='replace')}") from err
+            except (urllib.error.URLError, TimeoutError) as err:
+                wait = retry_wait(method, None, {}, time.time(), attempt)
+                if wait is None:
+                    raise RuntimeError(f"{method} {url} が届かなかった: {err}") from err
+            time.sleep(wait)
+        raise AssertionError("retry_wait は最後の回で None を返すので、ここには来ない")
 
     def get(self, path: str) -> dict:
         """get は、GET して 404 なら止める。"""
@@ -117,18 +124,24 @@ class GitHub:
         return body
 
 
-def rate_limit_wait(status: int, headers, now: float) -> float | None:
-    """rate_limit_wait は、API の呼び出し回数の上限に当たったとき、枠が戻るまで待つ秒数を返す（待たずに落とすときは None）。"""
-    # 上限に当たると 403 か 429 が返り、x-ratelimit-remaining が 0 で、x-ratelimit-reset に枠が戻る時刻（UNIX 秒）が入る。
+def retry_wait(method: str, status: int | None, headers, now: float, attempt: int) -> float | None:
+    """retry_wait は、失敗した呼び出しをやり直す前に待つ秒数を返す（やり直さずに落とすときは None）。"""
+    if attempt + 1 >= MAX_ATTEMPTS:
+        return None
+    # 呼び出し回数の上限に当たると 403 か 429 が返り、x-ratelimit-remaining が 0 で、x-ratelimit-reset に枠が戻る時刻（UNIX 秒）が入る。
     # ref: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-primary-rate-limit
-    if status not in (403, 429) or headers.get("x-ratelimit-remaining") != "0":
-        return None
-    try:
-        wait = float(headers.get("x-ratelimit-reset", "")) - now + 5
-    except ValueError:
-        return None
-    # 待つのを MAX_RATE_LIMIT_WAIT までにするのは、それより長いとジョブの timeout-minutes に届くため（届くなら落として、次の確認の回に任せる）。
-    return max(wait, 0) if wait <= MAX_RATE_LIMIT_WAIT else None
+    if status in (403, 429) and headers.get("x-ratelimit-remaining") == "0":
+        try:
+            wait = float(headers.get("x-ratelimit-reset", "")) - now + 5
+        except ValueError:
+            return None
+        # 待つのを MAX_RATE_LIMIT_WAIT までにするのは、それより長いとジョブの timeout-minutes に届くため（届くなら落として、次の確認の回に任せる）。
+        return max(wait, 0) if wait <= MAX_RATE_LIMIT_WAIT else None
+    # 5xx と、応答が返らなかったとき（status が None）は、GitHub 側の一時的な失敗なので、間を広げながらやり直す。
+    # POST をやり直さないのは、受け付けられていた場合に Issue や変数を二重に作るため（変数の作成は 2 回目が 409 で落ちる）。
+    if (status is None or 500 <= status < 600) and method != "POST":
+        return float(2 ** (attempt + 1))
+    return None
 
 
 def iso(t: dt.datetime) -> str:
