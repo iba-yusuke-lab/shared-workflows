@@ -172,20 +172,29 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(gh.calls[0], ("POST", "/repos/o/state/issues/5/comments"))
 
 
-class RateLimitTest(unittest.TestCase):
-    """RateLimitTest は、呼び出し回数の上限に当たったときに待つかどうかの判断を確かめる。"""
+class RetryWaitTest(unittest.TestCase):
+    """RetryWaitTest は、失敗した呼び出しをやり直すかどうかと、待つ秒数を確かめる。"""
 
-    def test_waits_until_reset(self) -> None:
+    def test_waits_until_rate_limit_reset(self) -> None:
         headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1000"}
-        self.assertEqual(rs.rate_limit_wait(403, headers, 900.0), 105.0)
+        self.assertEqual(rs.retry_wait("GET", 403, headers, 900.0, 0), 105.0)
 
-    def test_gives_up_when_reset_is_too_far(self) -> None:
+    def test_gives_up_when_rate_limit_reset_is_too_far(self) -> None:
         headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(rs.MAX_RATE_LIMIT_WAIT + 100)}
-        self.assertIsNone(rs.rate_limit_wait(429, headers, 0.0))
+        self.assertIsNone(rs.retry_wait("GET", 429, headers, 0.0, 0))
 
-    def test_does_not_wait_on_other_errors(self) -> None:
-        self.assertIsNone(rs.rate_limit_wait(403, {"x-ratelimit-remaining": "12"}, 0.0))
-        self.assertIsNone(rs.rate_limit_wait(500, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "10"}, 0.0))
+    def test_backs_off_on_server_errors(self) -> None:
+        self.assertEqual([rs.retry_wait("GET", 502, {}, 0.0, a) for a in range(rs.MAX_ATTEMPTS)], [2.0, 4.0, 8.0, None])
+
+    def test_retries_when_no_response(self) -> None:
+        self.assertEqual(rs.retry_wait("PATCH", None, {}, 0.0, 0), 2.0)
+
+    def test_does_not_retry_post_on_server_errors(self) -> None:
+        self.assertIsNone(rs.retry_wait("POST", 502, {}, 0.0, 0))
+
+    def test_does_not_retry_client_errors(self) -> None:
+        self.assertIsNone(rs.retry_wait("GET", 403, {"x-ratelimit-remaining": "12"}, 0.0, 0))
+        self.assertIsNone(rs.retry_wait("GET", 422, {}, 0.0, 0))
 
 
 if __name__ == "__main__":
