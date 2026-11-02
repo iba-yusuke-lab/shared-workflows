@@ -48,6 +48,7 @@ jobs:
 
 - lint のバージョンは、呼ぶ側の `mise.toml` に `aqua:zizmorcore/zizmor` などがあればそれを、なければ `gha-lint.yaml` の既定値を使う
 - shellcheck の規則は、呼ぶ側の `mise.toml` の `env.SHELLCHECK_OPTS`、`.shellcheckrc` の順に探す
+- shellcheck の配布物は、呼ぶ側の `mise.lock` に shellcheck があればその URL とチェックサムで、なければ `gha-lint.yaml` に固定した URL とチェックサムで確かめる
 - zizmor・actionlint・ghalint の設定（`.github/zizmor.yml`・`.github/actionlint.yaml`・`.github/ghalint.yaml`）は、それぞれの道具が呼ぶ側のリポジトリから読む
 
 ## Gitleaks
