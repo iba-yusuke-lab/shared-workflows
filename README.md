@@ -59,6 +59,7 @@ PR のベースブランチから HEAD までのコミットを gitleaks で検�
 - 呼ぶ側の `mise.lock` に gitleaks があれば、その URL とチェックサムで配布物を確かめる
   - なければ `gitleaks.yaml` に固定した URL とチェックサムを使う
   - gitleaks の配布物には attestation がないので、ハッシュを固定して確かめる
+  - x64 の配布物だけを入れるので、`runner` には x64 の Linux ランナーを渡す
 - `pull_request` 以外から呼ぶと、検査する範囲が決まらないので落ちる
 
 ## Runner Switch
