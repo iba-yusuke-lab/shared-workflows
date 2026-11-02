@@ -29,7 +29,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # 呼ぶ側の mise.toml にバージョンと shellcheck の規則があればそれを使うのは、ツールのバージョンを mise.toml に集めているリポジトリで、手元の mise run gha:lint と同じ条件で検査するため。
+      # 呼ぶ側の mise.toml にバージョンと shellcheck の規則があればそれを使うのは、ツールのバージョンを mise.toml に集めているリポジトリで、local で mise が入れたものと同じ条件で検査するため。
       # mise.toml を持たないリポジトリは、下の既定のバージョンと .shellcheckrc を使う。
       # shellcheck の規則を環境変数で渡すのは、actionlint が shellcheck を --norc で呼び、.shellcheckrc がワークフローの run に届かないため。
       # ref: https://github.com/rhysd/actionlint/blob/v1.7.12/rule_shellcheck.go#L193
@@ -70,7 +70,7 @@ jobs:
           printf 'shellcheck-opts=%s\n' "${shellcheck_opts}" >> "${GITHUB_OUTPUT}"
 
       # ランナーに入っている shellcheck を使わず、配布物を落としてチェックサムで検証してから PATH の先頭に置く。
-      # 呼ぶ側の mise.lock に shellcheck があればその URL とチェックサムを使うのは、手元の mise run gha:lint と同じ shellcheck で run の中身を検査するため。
+      # 呼ぶ側の mise.lock に shellcheck があればその URL とチェックサムを使うのは、local で mise が入れたものと同じ shellcheck で run の中身を検査するため。
       # mise.lock を持たないリポジトリは、下の既定の URL とチェックサムを使う。
       #   - `-p toml` は入力を TOML として読む
       #   - `[0]` は mise.lock の `[[tools."aqua:koalaman/shellcheck"]]`（配列の表）の 1 つ目
