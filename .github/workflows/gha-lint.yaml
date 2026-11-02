@@ -6,7 +6,7 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: ジョブを走らせるランナーのラベル（呼ぶ側の vars.RUNNER を渡す）
+        description: ジョブを走らせる x64 の Linux ランナーのラベル（呼ぶ側の vars.RUNNER を渡す）
         type: string
         default: blacksmith-2vcpu-ubuntu-2404
 
@@ -80,12 +80,22 @@ jobs:
           DEFAULT_URL: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
           DEFAULT_CHECKSUM: sha256:8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
         run: |
+          # x64 でないランナーで止めるのは、x64 の配布物を PATH の先頭に置くと、actionlint が shellcheck を実行できずに落ち、原因が分かりにくいため。
+          if [[ "${RUNNER_ARCH}" != X64 ]]; then
+            echo "::error::Install shellcheck は x64 の Linux ランナーだけで動く（RUNNER_ARCH=${RUNNER_ARCH}）"
+            exit 1
+          fi
           url="${DEFAULT_URL}"
           checksum="${DEFAULT_CHECKSUM}"
           if [[ -f mise.lock ]]; then
             locked="$(yq -p toml -oy '.tools["aqua:koalaman/shellcheck"][0]["platforms.linux-x64"] | (.url // "") + " " + (.checksum // "")' mise.lock)"
             if [[ "${locked}" != " " ]]; then
               read -r url checksum <<< "${locked}"
+              # 片方だけのときに止めるのは、read が空白を詰めて URL にチェックサムが入るなど、あとのステップで分かりにくい落ち方をするため。
+              if [[ -z "${url}" || -z "${checksum}" ]]; then
+                echo "::error::mise.lock の shellcheck の linux-x64 に url と checksum がそろっていない"
+                exit 1
+              fi
             fi
           fi
           dir="${RUNNER_TEMP}/shellcheck"
