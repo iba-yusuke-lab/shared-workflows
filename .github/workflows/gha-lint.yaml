@@ -69,6 +69,34 @@ jobs:
           fi
           printf 'shellcheck-opts=%s\n' "${shellcheck_opts}" >> "${GITHUB_OUTPUT}"
 
+      # ランナーに入っている shellcheck を使わず、配布物を落としてチェックサムで検証してから PATH の先頭に置く。
+      # 呼ぶ側の mise.lock に shellcheck があればその URL とチェックサムを使うのは、手元の mise run gha:lint と同じ shellcheck で run の中身を検査するため。
+      # mise.lock を持たないリポジトリは、下の既定の URL とチェックサムを使う。
+      #   - `-p toml` は入力を TOML として読む
+      #   - `[0]` は mise.lock の `[[tools."aqua:koalaman/shellcheck"]]`（配列の表）の 1 つ目
+      #   - `--strip-components=1` は、配布物の `shellcheck-v0.11.0/` のようなバージョン付きのディレクトリを外して取り出す
+      - name: Install shellcheck
+        env:
+          DEFAULT_URL: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          DEFAULT_CHECKSUM: sha256:8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          url="${DEFAULT_URL}"
+          checksum="${DEFAULT_CHECKSUM}"
+          if [[ -f mise.lock ]]; then
+            locked="$(yq -p toml -oy '.tools["aqua:koalaman/shellcheck"][0]["platforms.linux-x64"] | (.url // "") + " " + (.checksum // "")' mise.lock)"
+            if [[ "${locked}" != " " ]]; then
+              read -r url checksum <<< "${locked}"
+            fi
+          fi
+          dir="${RUNNER_TEMP}/shellcheck"
+          mkdir -p "${dir}"
+          curl -fsSL -o "${dir}/shellcheck.tar.xz" "${url}"
+          # チェックサムが合わなければ sha256sum が 1 で終わり、ステップが落ちる。
+          echo "${checksum#sha256:}  ${dir}/shellcheck.tar.xz" | sha256sum -c -
+          tar xJf "${dir}/shellcheck.tar.xz" -C "${dir}" --strip-components=1 --wildcards '*/shellcheck'
+          echo "${dir}" >> "${GITHUB_PATH}"
+          "${dir}/shellcheck" --version
+
       # 3 つの lint を 1 ジョブに並べるのは、ジョブ単位の切り上げ課金を 3 回払わないため（どれかが落ちても残りは走るので、指摘は 1 回でそろう）。
       # parallel: の中のステップは actionlint が検査しないので、"${var}" などの決まりは手で守る。
       - parallel:
@@ -101,7 +129,7 @@ jobs:
           - name: Run actionlint
             uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
             env:
-              # shellcheck 本体はランナーに入っているものを使うので、ここだけ手元とバージョンがそろわない。
+              # shellcheck 本体は、上で PATH の先頭に置いたものを actionlint が使う。
               SHELLCHECK_OPTS: ${{ steps.settings.outputs.shellcheck-opts }}
             with:
               # latest だと actionlint の新しいバージョンが出た日に CI の結果が変わるので固定する。
