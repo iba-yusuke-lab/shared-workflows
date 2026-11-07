@@ -269,9 +269,11 @@ def load_state(gh: GitHub, cfg: Config, start: dt.datetime) -> dict:
     """load_state は、前回までに締めた分数を読み、月が替わっていたら空から始める。"""
     raw = get_variable(gh, cfg.state_repo, "RUNNER_SWITCH_STATE")
     state = json.loads(raw) if raw else {}
-    if state.get("period") != iso(start):
+    repos = sorted(cfg.repos)
+    # 見張るリポジトリが変わったときも空から始めるのは、足したリポジトリの締めた区間の分を数え直さないと、少なく数えるため。
+    if state.get("period") != iso(start) or state.get("repos") != repos:
         # 締めの区間を月初の 1 日前から始めるのは、前月の末に作られて月初に走った run のジョブも数えるため（ジョブは始まった時刻で今月かどうかを決める）。
-        return {"period": iso(start), "settled_until": iso(start - dt.timedelta(days=1)), "settled_minutes": 0, "issue": state.get("issue")}
+        return {"period": iso(start), "repos": repos, "settled_until": iso(start - dt.timedelta(days=1)), "settled_minutes": 0, "issue": state.get("issue")}
     return state
 
 
