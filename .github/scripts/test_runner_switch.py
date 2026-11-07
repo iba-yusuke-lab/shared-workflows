@@ -109,6 +109,17 @@ class CountTest(unittest.TestCase):
         ]}})
         self.assertEqual(rs.blacksmith_minutes(gh, config(), "o/r", 1, self.since, self.now), 2)
 
+    def test_weights_arm_and_larger_runners(self) -> None:
+        gh = FakeGitHub({"/repos/o/r/actions/runs/1/jobs": {"jobs": [
+            job(["blacksmith-2vcpu-ubuntu-2404-arm"], "2026-11-01T00:00:00Z", "2026-11-01T00:08:00Z"),
+            job(["blacksmith-4vcpu-ubuntu-2404"], "2026-11-01T00:00:00Z", "2026-11-01T00:01:00Z"),
+            job(["blacksmith-4vcpu-ubuntu-2404-arm"], "2026-11-01T00:00:00Z", "2026-11-01T00:10:00Z"),
+        ]}})
+        self.assertEqual(rs.blacksmith_minutes(gh, config(), "o/r", 1, self.since, self.now), 5 + 2 + 12.5)
+
+    def test_counts_unknown_blacksmith_label_as_x64_2vcpu(self) -> None:
+        self.assertEqual(rs.weight("blacksmith-ubuntu-2404"), 1.0)
+
     def test_skips_jobs_before_period_and_counts_running_jobs_until_now(self) -> None:
         gh = FakeGitHub({"/repos/o/r/actions/runs/1/jobs": {"jobs": [
             job(["blacksmith-2vcpu-ubuntu-2404"], "2026-10-31T23:59:00Z", "2026-11-01T00:05:00Z"),

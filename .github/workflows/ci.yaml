@@ -26,15 +26,25 @@ jobs:
     name: GitHub Actions CI
     permissions:
       contents: read # checkout と zizmor の online-audits
+    strategy:
+      matrix:
+        # runner は、reusable workflow に渡すランナー。
+        # x64 と Arm を並べるのは、CPU ごとに配布物を選ぶ処理を両方で確かめるため。
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     # self-repository 構文（$/）にしているのは、checkout に関係なく、いま走っているコミットの reusable workflow を呼ぶため。
     uses: $/.github/workflows/gha-lint.yaml
     with:
-      runner: ubuntu-24.04
+      runner: ${{ matrix.runner }}
 
   gitleaks:
     name: Gitleaks
     permissions:
       contents: read # checkout
+    strategy:
+      matrix:
+        # runner は、reusable workflow に渡すランナー。
+        # x64 と Arm を並べるのは、CPU ごとに配布物を選ぶ処理を両方で確かめるため。
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     uses: $/.github/workflows/gitleaks.yaml
     with:
-      runner: ubuntu-24.04
+      runner: ${{ matrix.runner }}

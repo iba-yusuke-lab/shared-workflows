@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -35,6 +36,13 @@ SETTLE_AFTER = dt.timedelta(hours=48)
 # API の呼び出し回数の上限に当たったときに、枠が戻るのを待つ最長の秒数。
 # 15 分にしているのは、ジョブの timeout-minutes（20 分）の中で、待ったあとに数え終える時間を残すため。
 MAX_RATE_LIMIT_WAIT = 15 * 60
+
+# Blacksmith のランナーのラベルから、vCPU の数と Arm かどうかを読む。
+BLACKSMITH_LABEL = re.compile(r"^blacksmith-(?P<vcpu>\d+)vcpu-.*?(?P<arm>-arm)?$")
+
+# Arm の 2 vCPU の 1 分が、無料枠の x64 の 2 vCPU の何分にあたるか。
+# ref: https://docs.blacksmith.sh/blacksmith-runners/pricing
+ARM_WEIGHT = 0.625
 
 # 1 つの呼び出しを試す回数の上限（初回を含む）。
 # 4 回にしているのは、5xx のやり直しが 2・4・8 秒の間で収まり、一時的な失敗なら回復するのに十分なため。
@@ -180,15 +188,27 @@ def list_runs(gh: GitHub, repo: str, start: dt.datetime, end: dt.datetime) -> li
     return runs
 
 
-def blacksmith_minutes(gh: GitHub, cfg: Config, repo: str, run_id: int, since: dt.datetime, now: dt.datetime) -> int:
-    """blacksmith_minutes は、1 つの run のうち、since 以降に Blacksmith で始まったジョブの分数を足す。"""
-    total = 0
+def weight(label: str) -> float:
+    """weight は、Blacksmith のランナーの 1 分が、無料枠の x64 の 2 vCPU の何分にあたるかを返す。"""
+    match = BLACKSMITH_LABEL.match(label)
+    # 形の読めないラベルを x64 の 2 vCPU として数えるのは、少なく数えて無料枠を超えるより、早めに切り替えるほうを選ぶため。
+    if match is None:
+        return 1.0
+    # vCPU の数に比例させるのは、Blacksmith が大きいランナーの無料枠を vCPU の数に比例して減らすため。
+    scale = int(match["vcpu"]) / 2
+    return scale * ARM_WEIGHT if match["arm"] else scale
+
+
+def blacksmith_minutes(gh: GitHub, cfg: Config, repo: str, run_id: int, since: dt.datetime, now: dt.datetime) -> float:
+    """blacksmith_minutes は、1 つの run のうち、since 以降に Blacksmith で始まったジョブの分数を、無料枠の x64 の 2 vCPU の分に直して足す。"""
+    total = 0.0
     page = 1
     while True:
         # filter=all にしているのは、再実行した回のジョブも課金されるため（既定の latest は最後の回しか返さない）。
         body = gh.get(f"/repos/{repo}/actions/runs/{run_id}/jobs?filter=all&per_page=100&page={page}")
         for job in body["jobs"]:
-            if not any(label.startswith(cfg.blacksmith_label_prefix) for label in job.get("labels") or []):
+            labels = [label for label in job.get("labels") or [] if label.startswith(cfg.blacksmith_label_prefix)]
+            if not labels:
                 continue
             if not job.get("started_at"):
                 continue
@@ -201,15 +221,15 @@ def blacksmith_minutes(gh: GitHub, cfg: Config, repo: str, run_id: int, since: d
             # 分未満を切り上げるのは、Blacksmith がジョブごとに分未満を切り上げて数えるため。
             # この数え方は、Blacksmith のダッシュボードの値とほぼ一致し、わずかに多めに出る（安全側にずれる）。
             if seconds > 0:
-                total += math.ceil(seconds / 60)
+                total += math.ceil(seconds / 60) * weight(labels[0])
         if len(body["jobs"]) < 100:
             return total
         page += 1
 
 
-def count(gh: GitHub, cfg: Config, repos: list[str], start: dt.datetime, end: dt.datetime, since: dt.datetime, now: dt.datetime) -> int:
+def count(gh: GitHub, cfg: Config, repos: list[str], start: dt.datetime, end: dt.datetime, since: dt.datetime, now: dt.datetime) -> float:
     """count は、repos で start から end までに作られた run の、Blacksmith の分数を足す。"""
-    total = 0
+    total = 0.0
     for repo in repos:
         # 区間を割ったときの境目で同じ run が 2 回出ないように、id で 1 回だけ数える。
         run_ids = sorted({run["id"] for run in list_runs(gh, repo, start, end)})
@@ -307,7 +327,8 @@ def main() -> int:
     settle_to = max(settled_until, now - SETTLE_AFTER)
     newly_settled = count(gh, cfg, repos, settled_until + dt.timedelta(seconds=1), settle_to, start, now)
     recent = count(gh, cfg, repos, settle_to + dt.timedelta(seconds=1), now, start, now)
-    used = state["settled_minutes"] + newly_settled + recent
+    # 分未満を切り上げるのは、Arm の重みで端数が出た分を、少なく数えないため。
+    used = math.ceil(state["settled_minutes"] + newly_settled + recent)
 
     current = get_variable(gh, repos[0], "RUNNER")
     desired = decide(cfg, used, now, start, current)

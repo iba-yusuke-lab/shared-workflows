@@ -49,7 +49,7 @@ jobs:
 - lint のバージョンは、呼ぶ側の `mise.toml` に `aqua:zizmorcore/zizmor` などがあればそれを、なければ `gha-lint.yaml` の既定値を使う
 - shellcheck の規則は、呼ぶ側の `mise.toml` の `env.SHELLCHECK_OPTS`、`.shellcheckrc` の順に探す
 - shellcheck の配布物は、呼ぶ側の `mise.lock` に shellcheck があればその URL とチェックサムで、なければ `gha-lint.yaml` に固定した URL とチェックサムで確かめる
-  - x64 の配布物だけを入れるので、`runner` には x64 の Linux ランナーを渡す
+  - ランナーの CPU に合わせて、`mise.lock` の `linux-x64` か `linux-arm64` を使うので、`runner` には x64 か Arm の Linux ランナーを渡す
 - zizmor・actionlint・ghalint の設定（`.github/zizmor.yml`・`.github/actionlint.yaml`・`.github/ghalint.yaml`）は、それぞれの道具が呼ぶ側のリポジトリから読む
 
 ## Gitleaks
@@ -59,7 +59,7 @@ PR のベースブランチから HEAD までのコミットを gitleaks で検�
 - 呼ぶ側の `mise.lock` に gitleaks があれば、その URL とチェックサムで配布物を確かめる
   - なければ `gitleaks.yaml` に固定した URL とチェックサムを使う
   - gitleaks の配布物には attestation がないので、ハッシュを固定して確かめる
-  - x64 の配布物だけを入れるので、`runner` には x64 の Linux ランナーを渡す
+  - ランナーの CPU に合わせて、`mise.lock` の `linux-x64` か `linux-arm64` を使うので、`runner` には x64 か Arm の Linux ランナーを渡す
 - `pull_request` 以外から呼ぶと、検査する範囲が決まらないので落ちる
 
 ## Runner Switch
@@ -85,6 +85,7 @@ GitHub のランナーは、org に支払い方法がないので、無料枠（
 bot は 6 時間ごとに次を行う。
 
 1. 見張るリポジトリの run から、今月 Blacksmith のラベルで始まったジョブを集め、ジョブごとに分未満を切り上げて足す
+   - Arm と 2 vCPU より大きいランナーは、ラベルから読んだ重みで無料枠の x64 の 2 vCPU の分に直す
 2. 1,800 分（無料枠の 60%）以上なら、見張るリポジトリの変数 `RUNNER` を `ubuntu-24.04` にし、Issue を立てる
 3. 1,800 分未満なら `RUNNER` を消して Blacksmith に戻し、Issue を閉じる
 4. 見張るリポジトリに、確認した時刻 `RUNNER_CHECKED_AT` と今月の分数 `RUNNER_BLACKSMITH_MINUTES` を書く
@@ -109,7 +110,7 @@ bot は 6 時間ごとに次を行う。
 - 48 時間より前に作られた run を再実行したときのジョブ
   - run の作られた時刻で数える区間を決めていて、締めた区間には戻らないため
 - `blacksmith-` で始まらないラベルの Blacksmith のランナー
-  - 大きいランナーを使い始めたら、`BLACKSMITH_LABEL_PREFIX` と 1 分の重みを見直す
+  - そうしたランナーを使い始めたら、`BLACKSMITH_LABEL_PREFIX` を見直す
 
 ### bot が止まったときの警報
 
