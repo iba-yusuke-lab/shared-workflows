@@ -86,8 +86,9 @@ bot は 6 時間ごとに次を行う。
 
 1. 見張るリポジトリの run から、今月 Blacksmith のラベルで始まったジョブを集め、ジョブごとに分未満を切り上げて足す
    - Arm と 2 vCPU より大きいランナーは、ラベルから読んだ重みで無料枠の x64 の 2 vCPU の分に直す
-2. 1,800 分（無料枠の 60%）以上なら、見張るリポジトリの変数 `RUNNER` を `ubuntu-24.04-arm` にし、Issue を立てる
-   - 見張るリポジトリの CI は、Blacksmith でも GitHub でも Arm の Linux ランナーで動く前提にする
+2. 1,800 分（無料枠の 60%）以上なら、見張るリポジトリの変数 `RUNNER` を GitHub のランナーにし、Issue を立てる
+   - 切り替え先は、そのリポジトリの直近の Blacksmith のジョブのラベルと同じ CPU の `ubuntu-24.04` か `ubuntu-24.04-arm` にする
+   - CPU を合わせるのは、`mise.lock` が片方の CPU の配布物しか持たないリポジトリがあり、違う CPU では CI が落ちるため
 3. 1,800 分未満なら `RUNNER` を消して Blacksmith に戻し、Issue を閉じる
 4. 見張るリポジトリに、確認した時刻 `RUNNER_CHECKED_AT` と今月の分数 `RUNNER_BLACKSMITH_MINUTES` を書く
 
@@ -124,9 +125,13 @@ bot は 6 時間ごとに次を行う。
 
 警報が鳴ったら、このワークフローの実行履歴を見て、落ちていれば直す。
 
-直すまでの間は、見張るリポジトリで `gh variable set RUNNER --body ubuntu-24.04-arm` を走らせ、手で GitHub のランナーに替える。
+直すまでの間は、見張るリポジトリで `gh variable set RUNNER --body ubuntu-24.04-arm` を実行し、手で GitHub のランナーに替える。
+Blacksmith で x64 のラベルを使っていたリポジトリは、`ubuntu-24.04-arm` でなく `ubuntu-24.04` にする。
 
 ### 見張るリポジトリを足すとき
+
+Blacksmith を使うリポジトリは、すべて見張るリポジトリに足す。
+Blacksmith の無料枠は org 全体で数えるので、1 つでも抜けると bot が少なく数え、しきい値を超えても切り替わらないため。
 
 1. このリポジトリの変数 `MANAGED_REPOS` に、リポジトリ名をカンマ区切りで足す
 2. GitHub App `iba-lab-bot` の install 先に足す

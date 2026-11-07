@@ -18,7 +18,8 @@ def config(**overrides) -> rs.Config:
         "state_repo": "o/state",
         "threshold_minutes": 1800,
         "free_minutes": 3000,
-        "fallback_runner": "ubuntu-24.04-arm",
+        "fallback_runner_x64": "ubuntu-24.04",
+        "fallback_runner_arm": "ubuntu-24.04-arm",
         "blacksmith_label_prefix": "blacksmith-",
         "revert_not_before_hours": 12,
         "dry_run": True,
@@ -57,23 +58,49 @@ class DecideTest(unittest.TestCase):
 
     def test_switches_to_github_at_threshold(self) -> None:
         now = self.start + dt.timedelta(days=10)
-        self.assertEqual(rs.decide(config(), 1800, now, self.start, None), "ubuntu-24.04-arm")
+        self.assertTrue(rs.decide(config(), 1800, now, self.start, False))
 
     def test_stays_on_blacksmith_below_threshold(self) -> None:
         now = self.start + dt.timedelta(days=10)
-        self.assertIsNone(rs.decide(config(), 1799, now, self.start, None))
+        self.assertFalse(rs.decide(config(), 1799, now, self.start, False))
 
     def test_waits_for_hours_after_month_start(self) -> None:
         now = self.start + dt.timedelta(hours=11, minutes=59)
-        self.assertEqual(rs.decide(config(), 0, now, self.start, "ubuntu-24.04-arm"), "ubuntu-24.04-arm")
+        self.assertTrue(rs.decide(config(), 0, now, self.start, True))
 
     def test_reverts_after_waiting(self) -> None:
         now = self.start + dt.timedelta(hours=12)
-        self.assertIsNone(rs.decide(config(), 0, now, self.start, "ubuntu-24.04-arm"))
+        self.assertFalse(rs.decide(config(), 0, now, self.start, True))
 
     def test_reverts_manual_switch_mid_month(self) -> None:
         now = self.start + dt.timedelta(days=10)
-        self.assertIsNone(rs.decide(config(), 100, now, self.start, "ubuntu-latest"))
+        self.assertFalse(rs.decide(config(), 100, now, self.start, True))
+
+
+class FallbackTest(unittest.TestCase):
+    """FallbackTest は、切り替え先の CPU を、直近の Blacksmith のジョブのラベルに合わせることを確かめる。"""
+
+    def test_picks_arm_for_arm_label(self) -> None:
+        self.assertEqual(rs.fallback_for(config(), "blacksmith-2vcpu-ubuntu-2404-arm"), "ubuntu-24.04-arm")
+
+    def test_picks_x64_for_x64_label(self) -> None:
+        self.assertEqual(rs.fallback_for(config(), "blacksmith-2vcpu-ubuntu-2404"), "ubuntu-24.04")
+
+    def test_picks_x64_without_label(self) -> None:
+        self.assertEqual(rs.fallback_for(config(), None), "ubuntu-24.04")
+
+    def test_finds_label_in_latest_blacksmith_job(self) -> None:
+        gh = FakeGitHub({
+            "/repos/o/r/actions/runs?": {"workflow_runs": [{"id": 2}, {"id": 1}]},
+            "/repos/o/r/actions/runs/2/jobs": {"jobs": [job(["ubuntu-24.04"], None, None)]},
+            "/repos/o/r/actions/runs/1/jobs": {"jobs": [job(["blacksmith-2vcpu-ubuntu-2404-arm"], None, None)]},
+        })
+        self.assertEqual(rs.latest_blacksmith_label(gh, config(), "o/r"), "blacksmith-2vcpu-ubuntu-2404-arm")
+
+    def test_treats_blacksmith_label_in_runner_as_not_switched(self) -> None:
+        self.assertFalse(rs.is_github_runner(config(), "blacksmith-2vcpu-ubuntu-2404"))
+        self.assertFalse(rs.is_github_runner(config(), None))
+        self.assertTrue(rs.is_github_runner(config(), "ubuntu-24.04"))
 
 
 class StateTest(unittest.TestCase):
@@ -165,21 +192,21 @@ class NotifyTest(unittest.TestCase):
     def test_opens_issue_in_issue_repo(self) -> None:
         gh = RecordingGitHub()
         state: dict = {"issue": None}
-        rs.notify(gh, config(), state, "ubuntu-24.04-arm", 1800, self.now)
+        rs.notify(gh, config(), state, True, 1800, self.now)
         self.assertEqual(gh.calls, [("POST", "/repos/o/a/issues")])
         self.assertEqual(state["issue"], {"repo": "o/a", "number": 7})
 
     def test_closes_issue_where_it_was_opened(self) -> None:
         gh = RecordingGitHub()
         state = {"issue": {"repo": "o/old", "number": 3}}
-        rs.notify(gh, config(), state, None, 0, self.now)
+        rs.notify(gh, config(), state, False, 0, self.now)
         self.assertEqual(gh.calls, [("POST", "/repos/o/old/issues/3/comments"), ("PATCH", "/repos/o/old/issues/3")])
         self.assertIsNone(state["issue"])
 
     def test_treats_legacy_issue_number_as_state_repo(self) -> None:
         gh = RecordingGitHub()
         state = {"issue": 5}
-        rs.notify(gh, config(), state, None, 0, self.now)
+        rs.notify(gh, config(), state, False, 0, self.now)
         self.assertEqual(gh.calls[0], ("POST", "/repos/o/state/issues/5/comments"))
 
 
