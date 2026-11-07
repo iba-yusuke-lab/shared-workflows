@@ -81,7 +81,7 @@ jobs:
           # しきい値は無料枠（3,000 分）の 60% で、決めた経緯は利用側のリポジトリの ADR にある。
           THRESHOLD_MINUTES: "1800"
           FREE_MINUTES: "3000"
-          FALLBACK_RUNNER: ubuntu-24.04
+          FALLBACK_RUNNER: ubuntu-24.04-arm
           BLACKSMITH_LABEL_PREFIX: blacksmith-
           REVERT_NOT_BEFORE_HOURS: "12"
           # schedule では inputs が空なので、手で起こして dry-run を外したときと同じく書き込む。

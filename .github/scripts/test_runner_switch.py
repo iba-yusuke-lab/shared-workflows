@@ -18,7 +18,7 @@ def config(**overrides) -> rs.Config:
         "state_repo": "o/state",
         "threshold_minutes": 1800,
         "free_minutes": 3000,
-        "fallback_runner": "ubuntu-24.04",
+        "fallback_runner": "ubuntu-24.04-arm",
         "blacksmith_label_prefix": "blacksmith-",
         "revert_not_before_hours": 12,
         "dry_run": True,
@@ -57,7 +57,7 @@ class DecideTest(unittest.TestCase):
 
     def test_switches_to_github_at_threshold(self) -> None:
         now = self.start + dt.timedelta(days=10)
-        self.assertEqual(rs.decide(config(), 1800, now, self.start, None), "ubuntu-24.04")
+        self.assertEqual(rs.decide(config(), 1800, now, self.start, None), "ubuntu-24.04-arm")
 
     def test_stays_on_blacksmith_below_threshold(self) -> None:
         now = self.start + dt.timedelta(days=10)
@@ -65,11 +65,11 @@ class DecideTest(unittest.TestCase):
 
     def test_waits_for_hours_after_month_start(self) -> None:
         now = self.start + dt.timedelta(hours=11, minutes=59)
-        self.assertEqual(rs.decide(config(), 0, now, self.start, "ubuntu-24.04"), "ubuntu-24.04")
+        self.assertEqual(rs.decide(config(), 0, now, self.start, "ubuntu-24.04-arm"), "ubuntu-24.04-arm")
 
     def test_reverts_after_waiting(self) -> None:
         now = self.start + dt.timedelta(hours=12)
-        self.assertIsNone(rs.decide(config(), 0, now, self.start, "ubuntu-24.04"))
+        self.assertIsNone(rs.decide(config(), 0, now, self.start, "ubuntu-24.04-arm"))
 
     def test_reverts_manual_switch_mid_month(self) -> None:
         now = self.start + dt.timedelta(days=10)
@@ -165,7 +165,7 @@ class NotifyTest(unittest.TestCase):
     def test_opens_issue_in_issue_repo(self) -> None:
         gh = RecordingGitHub()
         state: dict = {"issue": None}
-        rs.notify(gh, config(), state, "ubuntu-24.04", 1800, self.now)
+        rs.notify(gh, config(), state, "ubuntu-24.04-arm", 1800, self.now)
         self.assertEqual(gh.calls, [("POST", "/repos/o/a/issues")])
         self.assertEqual(state["issue"], {"repo": "o/a", "number": 7})
 
