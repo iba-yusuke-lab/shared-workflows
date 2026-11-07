@@ -6,7 +6,7 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: ジョブを走らせる x64 の Linux ランナーのラベル（呼ぶ側の vars.RUNNER を渡す）
+        description: ジョブを走らせる x64 か Arm の Linux ランナーのラベル（呼ぶ側の vars.RUNNER を渡す）
         type: string
         default: blacksmith-2vcpu-ubuntu-2404
 
@@ -77,23 +77,28 @@ jobs:
       #   - `--strip-components=1` は、配布物の `shellcheck-v0.11.0/` のようなバージョン付きのディレクトリを外して取り出す
       - name: Install shellcheck
         env:
-          DEFAULT_URL: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
-          DEFAULT_CHECKSUM: sha256:8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          DEFAULT_URL_X64: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          DEFAULT_CHECKSUM_X64: sha256:8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          DEFAULT_URL_ARM64: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.aarch64.tar.xz
+          DEFAULT_CHECKSUM_ARM64: sha256:12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
         run: |
-          # x64 でないランナーで止めるのは、x64 の配布物を PATH の先頭に置くと、actionlint が shellcheck を実行できずに落ち、原因が分かりにくいため。
-          if [[ "${RUNNER_ARCH}" != X64 ]]; then
-            echo "::error::Install shellcheck は x64 の Linux ランナーだけで動く（RUNNER_ARCH=${RUNNER_ARCH}）"
-            exit 1
-          fi
-          url="${DEFAULT_URL}"
-          checksum="${DEFAULT_CHECKSUM}"
+          # ランナーの CPU で、mise.lock のプラットフォームと既定の配布物を選ぶ。
+          # x64 と Arm のほかで止めるのは、合わない配布物を PATH の先頭に置くと、actionlint が shellcheck を実行できずに落ち、原因が分かりにくいため。
+          case "${RUNNER_ARCH}" in
+            X64) platform=linux-x64 url="${DEFAULT_URL_X64}" checksum="${DEFAULT_CHECKSUM_X64}" ;;
+            ARM64) platform=linux-arm64 url="${DEFAULT_URL_ARM64}" checksum="${DEFAULT_CHECKSUM_ARM64}" ;;
+            *)
+              echo "::error::Install shellcheck は x64 か Arm の Linux ランナーだけで動く（RUNNER_ARCH=${RUNNER_ARCH}）"
+              exit 1
+              ;;
+          esac
           if [[ -f mise.lock ]]; then
-            locked="$(yq -p toml -oy '.tools["aqua:koalaman/shellcheck"][0]["platforms.linux-x64"] | (.url // "") + " " + (.checksum // "")' mise.lock)"
+            locked="$(yq -p toml -oy ".tools[\"aqua:koalaman/shellcheck\"][0][\"platforms.${platform}\"] | (.url // \"\") + \" \" + (.checksum // \"\")" mise.lock)"
             if [[ "${locked}" != " " ]]; then
               read -r url checksum <<< "${locked}"
               # 片方だけのときに止めるのは、read が空白を詰めて URL にチェックサムが入るなど、あとのステップで分かりにくい落ち方をするため。
               if [[ -z "${url}" || -z "${checksum}" ]]; then
-                echo "::error::mise.lock の shellcheck の linux-x64 に url と checksum がそろっていない"
+                echo "::error::mise.lock の shellcheck の ${platform} に url と checksum がそろっていない"
                 exit 1
               fi
             fi
@@ -157,7 +162,16 @@ jobs:
               GHALINT_VERSION: ${{ steps.settings.outputs.ghalint }}
             run: |
               # asset 名もタグも、mise.toml の値に v を付けない形と付ける形で組む。
-              asset="ghalint_${GHALINT_VERSION}_linux_amd64.tar.gz"
+              # asset の CPU は、ランナーの CPU に合わせる。
+              case "${RUNNER_ARCH}" in
+                X64) arch=amd64 ;;
+                ARM64) arch=arm64 ;;
+                *)
+                  echo "::error::Run ghalint は x64 か Arm の Linux ランナーだけで動く（RUNNER_ARCH=${RUNNER_ARCH}）"
+                  exit 1
+                  ;;
+              esac
+              asset="ghalint_${GHALINT_VERSION}_linux_${arch}.tar.gz"
               dir="${RUNNER_TEMP}/ghalint"
               mkdir -p "${dir}"
               gh release download -R suzuki-shunsuke/ghalint "v${GHALINT_VERSION}" -p "${asset}" -D "${dir}"
