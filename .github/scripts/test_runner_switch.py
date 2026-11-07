@@ -119,7 +119,31 @@ class StateTest(unittest.TestCase):
             state = rs.load_state(None, config(), start)
         finally:
             rs.get_variable = original
-        self.assertEqual(state, {"period": "2026-11-01T00:00:00Z", "settled_until": "2026-10-31T00:00:00Z", "settled_minutes": 0, "issue": 3})
+        self.assertEqual(state, {"period": "2026-11-01T00:00:00Z", "repos": ["o/a", "o/b"], "settled_until": "2026-10-31T00:00:00Z", "settled_minutes": 0, "issue": 3})
+
+    def test_resets_when_managed_repos_change(self) -> None:
+        start = dt.datetime(2026, 11, 1, tzinfo=UTC)
+        old = {"period": "2026-11-01T00:00:00Z", "repos": ["o/a"], "settled_until": "2026-11-05T00:00:00Z", "settled_minutes": 900, "issue": None}
+        original = rs.get_variable
+        rs.get_variable = lambda gh, repo, name: __import__("json").dumps(old)
+        try:
+            state = rs.load_state(None, config(), start)
+        finally:
+            rs.get_variable = original
+        self.assertEqual(state["settled_minutes"], 0)
+        self.assertEqual(state["settled_until"], "2026-10-31T00:00:00Z")
+        self.assertEqual(state["repos"], ["o/a", "o/b"])
+
+    def test_keeps_state_when_managed_repos_are_the_same(self) -> None:
+        start = dt.datetime(2026, 11, 1, tzinfo=UTC)
+        old = {"period": "2026-11-01T00:00:00Z", "repos": ["o/a", "o/b"], "settled_until": "2026-11-05T00:00:00Z", "settled_minutes": 900, "issue": None}
+        original = rs.get_variable
+        rs.get_variable = lambda gh, repo, name: __import__("json").dumps(old)
+        try:
+            state = rs.load_state(None, config(repos=["o/b", "o/a"]), start)
+        finally:
+            rs.get_variable = original
+        self.assertEqual(state, old)
 
 
 class CountTest(unittest.TestCase):
