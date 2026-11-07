@@ -85,6 +85,7 @@ GitHub のランナーは、org に支払い方法がないので、無料枠（
 bot は 6 時間ごとに次を行う。
 
 1. 見張るリポジトリの run から、今月 Blacksmith のラベルで始まったジョブを集め、ジョブごとに分未満を切り上げて足す
+   - Arm と 2 vCPU より大きいランナーは、ラベルから読んだ重みで無料枠の x64 の 2 vCPU の分に直す
 2. 1,800 分（無料枠の 60%）以上なら、見張るリポジトリの変数 `RUNNER` を `ubuntu-24.04` にし、Issue を立てる
 3. 1,800 分未満なら `RUNNER` を消して Blacksmith に戻し、Issue を閉じる
 4. 見張るリポジトリに、確認した時刻 `RUNNER_CHECKED_AT` と今月の分数 `RUNNER_BLACKSMITH_MINUTES` を書く
@@ -109,7 +110,7 @@ bot は 6 時間ごとに次を行う。
 - 48 時間より前に作られた run を再実行したときのジョブ
   - run の作られた時刻で数える区間を決めていて、締めた区間には戻らないため
 - `blacksmith-` で始まらないラベルの Blacksmith のランナー
-  - 大きいランナーを使い始めたら、`BLACKSMITH_LABEL_PREFIX` と 1 分の重みを見直す
+  - そうしたランナーを使い始めたら、`BLACKSMITH_LABEL_PREFIX` を見直す
 
 ### bot が止まったときの警報
 
