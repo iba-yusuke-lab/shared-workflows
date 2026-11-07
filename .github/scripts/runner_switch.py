@@ -2,6 +2,7 @@
 
 各リポジトリのワークフローは `runs-on: ${{ vars.RUNNER || 'blacksmith-2vcpu-ubuntu-2404' }}` で、RUNNER がなければ Blacksmith で走る。
 Blacksmith は無料枠を超えても止まらずに課金を続けるので、しきい値を超えたら RUNNER を GitHub のランナーにし、月が替わったら消して Blacksmith に戻す。
+切り替え先の CPU は、リポジトリごとに直近の Blacksmith のジョブのラベルに合わせる。
 GitHub のランナーは org に支払い方法がないので、枠が尽きたら止まり、課金は起きない。
 
 標準ライブラリだけで書いているのは、ランナーに何も入れずに走らせ、依存の更新を追わずに済ませるため。
@@ -44,6 +45,10 @@ BLACKSMITH_LABEL = re.compile(r"^blacksmith-(?P<vcpu>\d+)vcpu-.*?(?P<arm>-arm)?$
 # ref: https://docs.blacksmith.sh/blacksmith-runners/pricing
 ARM_WEIGHT = 0.625
 
+# 切り替え先の CPU を決めるときに、ジョブのラベルを探す直近の run の数。
+# 20 にしているのは、GitHub のランナーに固定したワークフローの run が続いても、Blacksmith のジョブに当たるのに十分なため。
+RECENT_RUNS = 20
+
 # 1 つの呼び出しを試す回数の上限（初回を含む）。
 # 4 回にしているのは、5xx のやり直しが 2・4・8 秒の間で収まり、一時的な失敗なら回復するのに十分なため。
 MAX_ATTEMPTS = 4
@@ -58,7 +63,8 @@ class Config:
     state_repo: str
     threshold_minutes: int
     free_minutes: int
-    fallback_runner: str
+    fallback_runner_x64: str
+    fallback_runner_arm: str
     blacksmith_label_prefix: str
     revert_not_before_hours: int
     dry_run: bool
@@ -79,7 +85,8 @@ class Config:
             state_repo=os.environ["STATE_REPO"],
             threshold_minutes=int(os.environ["THRESHOLD_MINUTES"]),
             free_minutes=int(os.environ["FREE_MINUTES"]),
-            fallback_runner=os.environ["FALLBACK_RUNNER"],
+            fallback_runner_x64=os.environ["FALLBACK_RUNNER_X64"],
+            fallback_runner_arm=os.environ["FALLBACK_RUNNER_ARM"],
             blacksmith_label_prefix=os.environ["BLACKSMITH_LABEL_PREFIX"],
             revert_not_before_hours=int(os.environ["REVERT_NOT_BEFORE_HOURS"]),
             dry_run=os.environ.get("DRY_RUN", "true") == "true",
@@ -268,33 +275,59 @@ def load_state(gh: GitHub, cfg: Config, start: dt.datetime) -> dict:
     return state
 
 
-def decide(cfg: Config, used: int, now: dt.datetime, start: dt.datetime, current: str | None) -> str | None:
-    """decide は、今月の分数から RUNNER のあるべき値を決める（None は変数を消して Blacksmith に戻すこと）。"""
+def decide(cfg: Config, used: int, now: dt.datetime, start: dt.datetime, switched: bool) -> bool:
+    """decide は、今月の分数から GitHub のランナーで走らせるべきかを決める（False は変数を消して Blacksmith に戻すこと）。"""
     if used >= cfg.threshold_minutes:
-        return cfg.fallback_runner
+        return True
     # 月初から数時間は GitHub のランナーのまま待つのは、Blacksmith の月の切り替わりが UTC の 0 時かどうか確かめておらず、先に戻すと前月の枠を超えた分として課金されうるため。
-    if current is not None and now < start + dt.timedelta(hours=cfg.revert_not_before_hours):
-        return current
+    return switched and now < start + dt.timedelta(hours=cfg.revert_not_before_hours)
+
+
+def latest_blacksmith_label(gh: GitHub, cfg: Config, repo: str) -> str | None:
+    """latest_blacksmith_label は、リポジトリの直近の run から、Blacksmith のジョブのラベルを探す（見つからなければ None）。"""
+    runs = gh.get(f"/repos/{repo}/actions/runs?per_page={RECENT_RUNS}")["workflow_runs"]
+    for run in runs:
+        body = gh.get(f"/repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100")
+        for job in body["jobs"]:
+            for label in job.get("labels") or []:
+                if label.startswith(cfg.blacksmith_label_prefix):
+                    return label
     return None
 
 
-def notify(gh: GitHub, cfg: Config, state: dict, desired: str | None, used: int, now: dt.datetime) -> None:
+def is_github_runner(cfg: Config, runner: str | None) -> bool:
+    """is_github_runner は、RUNNER の値が GitHub のランナーを指しているかを返す。"""
+    return runner is not None and not runner.startswith(cfg.blacksmith_label_prefix)
+
+
+def fallback_for(cfg: Config, label: str | None) -> str:
+    """fallback_for は、Blacksmith のラベルと同じ CPU の GitHub のランナーを返す。"""
+    match = BLACKSMITH_LABEL.match(label) if label is not None else None
+    # CPU を合わせるのは、mise.lock が片方の CPU の配布物しか持たないリポジトリがあり、違う CPU では CI が落ちるため。
+    if match is not None and match["arm"]:
+        return cfg.fallback_runner_arm
+    # ラベルが見つからないときに x64 にするのは、Blacksmith の既定のラベルが x64 で、多くのリポジトリがそのまま動くため。
+    return cfg.fallback_runner_x64
+
+
+def notify(gh: GitHub, cfg: Config, state: dict, switch: bool, used: int, now: dt.datetime) -> None:
     """notify は、GitHub のランナーへ替えたときに Issue を立て、Blacksmith に戻したときに閉じる。"""
     issue = state.get("issue")
     # 古い形（番号だけ）は、Issue をこのリポジトリに立てていたころの state なので、このリポジトリの Issue として扱う。
     if isinstance(issue, int):
         issue = {"repo": cfg.state_repo, "number": issue}
-    if desired is not None and issue is None:
+    if switch and issue is None:
         _, body = gh.request("POST", f"/repos/{cfg.issue_repo}/issues", {
             "title": f"Blacksmith の使用量が {cfg.threshold_minutes} 分を超えたので、GitHub のランナーに切り替えた",
             "body": "\n\n".join([
                 f"{iso(now)} の時点で、今月の Blacksmith の使用量は {used} 分（無料枠 {cfg.free_minutes} 分）だった。",
-                f"Runner Switch の bot が、見張るリポジトリの変数 `RUNNER` を `{desired}` にしたので、次のジョブから GitHub のランナーで走る。",
+                "Runner Switch の bot が、見張るリポジトリの変数 `RUNNER` を GitHub のランナーにしたので、次のジョブから GitHub のランナーで走る。",
+                "CPU は、リポジトリごとに直近の Blacksmith のジョブに合わせてある。",
                 "月が替わると bot が `RUNNER` を消して Blacksmith に戻し、この Issue を閉じる。",
             ]),
         })
         issue = {"repo": cfg.issue_repo, "number": body["number"]} if body else None
-    elif desired is None and issue is not None:
+    elif not switch and issue is not None:
         gh.request("POST", f"/repos/{issue['repo']}/issues/{issue['number']}/comments", {
             "body": f"{iso(now)} に月が替わったので、bot が `RUNNER` を消して Blacksmith に戻した。",
         })
@@ -330,11 +363,19 @@ def main() -> int:
     # 分未満を切り上げるのは、Arm の重みで端数が出た分を、少なく数えないため。
     used = math.ceil(state["settled_minutes"] + newly_settled + recent)
 
-    current = get_variable(gh, repos[0], "RUNNER")
-    desired = decide(cfg, used, now, start, current)
+    currents = {repo: get_variable(gh, repo, "RUNNER") for repo in repos}
+    switch = decide(cfg, used, now, start, any(is_github_runner(cfg, value) for value in currents.values()))
+    desired: dict[str, str | None] = {repo: None for repo in repos}
+    if switch:
+        for repo, current in currents.items():
+            # すでに GitHub のランナーにしてあれば残すのは、月初に待っている間や、人が選んだランナーを保つため。
+            if is_github_runner(cfg, current):
+                desired[repo] = current
+            else:
+                desired[repo] = fallback_for(cfg, latest_blacksmith_label(gh, cfg, repo))
 
     # 結果をログではなく変数に書くのは、このリポジトリの Actions のログが外から見えるため（使用量も切り替えの有無も出さない）。
-    result = {"checked_at": iso(now), "used_minutes": used, "threshold_minutes": cfg.threshold_minutes, "runner": desired}
+    result = {"checked_at": iso(now), "used_minutes": used, "threshold_minutes": cfg.threshold_minutes, "runners": desired}
     if cfg.dry_run:
         set_variable(gh, cfg.state_repo, "RUNNER_SWITCH_DRY_RUN", json.dumps(result))
         print("dry-run の結果を、このリポジトリの変数 RUNNER_SWITCH_DRY_RUN に書いた")
@@ -342,16 +383,16 @@ def main() -> int:
 
     for repo in repos:
         # 全リポジトリを毎回あるべき値にそろえるのは、人が手で変えた値や、途中で落ちた回の書き残しも次の回で直すため。
-        if get_variable(gh, repo, "RUNNER") != desired:
-            if desired is None:
+        if currents[repo] != desired[repo]:
+            if desired[repo] is None:
                 delete_variable(gh, repo, "RUNNER")
             else:
-                set_variable(gh, repo, "RUNNER", desired)
+                set_variable(gh, repo, "RUNNER", desired[repo])
         # 各リポジトリの CI がこの時刻を見て、bot が止まっていたら警告を出す。
         set_variable(gh, repo, "RUNNER_CHECKED_AT", iso(now))
         set_variable(gh, repo, "RUNNER_BLACKSMITH_MINUTES", str(used))
 
-    notify(gh, cfg, state, desired, used, now)
+    notify(gh, cfg, state, switch, used, now)
     state["settled_until"] = iso(settle_to)
     state["settled_minutes"] += newly_settled
     set_variable(gh, cfg.state_repo, "RUNNER_SWITCH_STATE", json.dumps(state))
